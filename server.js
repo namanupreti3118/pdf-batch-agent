@@ -5,232 +5,138 @@ const fs = require('fs');
 const archiver = require('archiver');
 const { v4: uuidv4 } = require('uuid');
 const XLSX = require('xlsx');
-const pdfjsLib = require('pdfjs-dist');
-const Tesseract = require('tesseract.js');
+const pdfParse = require('pdf-parse');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const uploadDir = path.join(__dirname, 'uploads');
 const outputDir = path.join(__dirname, 'exports');
 const publicDir = path.join(__dirname, 'public');
+const jobs = new Map();
 
-const jobs = {};
-
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+for (const dir of [uploadDir, outputDir]) {
+  fs.mkdirSync(dir, { recursive: true });
+}
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`)
+  destination: (_req, _file, cb) => cb(null, uploadDir),
+  filename: (_req, _file, cb) => cb(null, `${uuidv4()}.pdf`)
+});
+const upload = multer({
+  storage,
+  limits: { fileSize: 100 * 1024 * 1024, files: 500 }
 });
 
-const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } });
-
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 app.use(express.static(publicDir));
+app.get('/api/health', (_req, res) => res.json({ ok: true, name: 'PDF Batch Agent' }));
+app.get('/api/jobs', (_req, res) => res.json([...jobs.values()]));
 
-app.get('/api/health', (req, res) => {
-  res.json({ ok: true, name: 'PDF Batch Agent', status: 'running' });
-});
-
-app.get('/api/jobs', (req, res) => {
-  res.json(Object.values(jobs));
-});
-
-app.post('/api/upload', upload.array('pdfs', 1000), async (req, res) => {
-  if (!req.files || req.files.length === 0) {
-    return res.status(400).json({ error: 'No PDF files uploaded.' });
+app.post('/api/upload', upload.array('pdfs', 500), (req, res) => {
+  const files = req.files || [];
+  if (!files.length) return res.status(400).json({ error: 'Select at least one PDF.' });
+  if (files.some(file => path.extname(file.originalname).toLowerCase() !== '.pdf')) {
+    files.forEach(file => fs.rm(file.path, { force: true }, () => {}));
+    return res.status(400).json({ error: 'Every file in the batch must be a PDF.' });
   }
 
-  const pdfFiles = req.files.filter(file => file.originalname.toLowerCase().endsWith('.pdf'));
-  if (pdfFiles.length === 0) {
-    return res.status(400).json({ error: 'Only PDF files are allowed.' });
-  }
-
-  const jobId = uuidv4();
-  const options = {
-    mode: req.body.mode || 'excel',
-    ocr: req.body.ocr === 'true',
-    combine: req.body.combine === 'true'
-  };
-
-  jobs[jobId] = {
-    id: jobId,
+  const id = uuidv4();
+  const job = {
+    id,
     status: 'queued',
     createdAt: new Date().toISOString(),
-    totalFiles: pdfFiles.length,
+    totalFiles: files.length,
     completedFiles: 0,
+    failedFiles: 0,
     progress: 0,
-    mode: options.mode,
-    ocr: options.ocr,
-    combine: options.combine,
-    zipName: `${jobId}.zip`,
-    results: []
+    results: [],
+    downloadUrl: null
   };
-
-  processJob(jobId, pdfFiles, options);
-
-  res.json({ success: true, jobId, message: 'Batch started successfully.' });
+  jobs.set(id, job);
+  res.status(202).json({ success: true, jobId: id, message: 'Batch queued.' });
+  processJob(job, files).catch(error => {
+    console.error(`Job ${id} failed`, error);
+    job.status = 'failed';
+    job.error = 'The batch could not be completed. Please retry.';
+  });
 });
 
 app.get('/api/job/:jobId', (req, res) => {
-  const { jobId } = req.params;
-  if (!jobs[jobId]) {
-    return res.status(404).json({ error: 'Job not found' });
-  }
-  res.json(jobs[jobId]);
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found.' });
+  res.json(job);
 });
 
 app.get('/api/download/:jobId', (req, res) => {
-  const { jobId } = req.params;
-  const job = jobs[jobId];
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-
-  const archivePath = path.join(outputDir, job.zipName);
-  if (!fs.existsSync(archivePath)) {
-    return res.status(404).json({ error: 'Output archive is not ready yet.' });
-  }
-
-  res.download(archivePath, job.zipName);
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found.' });
+  if (job.status !== 'completed') return res.status(409).json({ error: 'The batch is not ready yet.' });
+  res.download(path.join(outputDir, `${job.id}.zip`), `${job.id}-results.zip`);
 });
 
-app.get('*', (req, res) => {
-  res.sendFile(path.join(publicDir, 'index.html'));
-});
+app.get('*', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));
 
-async function processJob(jobId, files, options) {
-  const job = jobs[jobId];
-  if (!job) return;
-
+async function processJob(job, files) {
   job.status = 'processing';
-  job.extracted = [];
+  const jobDir = path.join(outputDir, job.id);
+  fs.mkdirSync(jobDir, { recursive: true });
+  const rowsForCombinedWorkbook = [];
+  const generatedFiles = [];
 
-  const outputFiles = [];
-
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    const filePath = path.join(uploadDir, file.filename);
-    const originalName = file.originalname.replace(/\.pdf$/i, '');
-
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    const displayName = path.basename(file.originalname, path.extname(file.originalname));
     try {
-      const parsedData = await extractPdfData(filePath, options.ocr);
-      const outputName = `${originalName}.xlsx`;
-      const outputPath = path.join(outputDir, outputName);
-
+      const parsed = await pdfParse(fs.readFileSync(file.path));
+      const text = (parsed.text || '').trim();
+      const rows = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+      const records = (rows.length ? rows : ['No selectable text found; this PDF may be scanned or image-only.'])
+        .map((line, lineIndex) => ({ source_file: file.originalname, row: lineIndex + 1, text: line }));
       const workbook = XLSX.utils.book_new();
-      const worksheet = XLSX.utils.json_to_sheet(parsedData.rows);
-      XLSX.utils.book_append_sheet(workbook, worksheet, 'ExtractedData');
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(records), 'Extracted text');
+      const outputName = `${String(index + 1).padStart(3, '0')}-${safeName(displayName)}.xlsx`;
+      const outputPath = path.join(jobDir, outputName);
       XLSX.writeFile(workbook, outputPath);
-
-      outputFiles.push({
-        originalName,
-        outputName,
-        rows: parsedData.rows.length,
-        pageCount: parsedData.pageCount
-      });
-
-      job.completedFiles = i + 1;
-      job.progress = Math.round(((i + 1) / files.length) * 100);
-      job.results = outputFiles;
-      job.status = i === files.length - 1 ? 'finalizing' : 'processing';
+      generatedFiles.push({ outputPath, outputName });
+      rowsForCombinedWorkbook.push(...records);
+      job.results.push({ file: file.originalname, status: 'completed', rows: records.length, pages: parsed.numpages });
     } catch (error) {
-      console.error(`Error processing ${file.originalname}`, error);
-      job.results.push({
-        originalName,
-        error: error.message || 'Processing failed.',
-        rows: 0,
-        pageCount: 0
-      });
+      job.failedFiles += 1;
+      job.results.push({ file: file.originalname, status: 'failed', error: error.message || 'PDF could not be read.' });
+    } finally {
+      fs.rm(file.path, { force: true }, () => {});
+      job.completedFiles += 1;
+      job.progress = Math.round((job.completedFiles / job.totalFiles) * 100);
     }
   }
 
-  if (options.combine) {
-    const combinedRows = [];
-    for (const item of job.results) {
-      if (item.rows > 0) {
-        combinedRows.push({
-          file: item.originalName,
-          rows: item.rows,
-          pageCount: item.pageCount,
-          status: 'converted'
-        });
-      }
-    }
-
-    const combinedWorkbook = XLSX.utils.book_new();
-    const combinedSheet = XLSX.utils.json_to_sheet(combinedRows);
-    XLSX.utils.book_append_sheet(combinedWorkbook, combinedSheet, 'Summary');
-    XLSX.writeFile(combinedWorkbook, path.join(outputDir, `${jobId}-summary.xlsx`));
+  if (rowsForCombinedWorkbook.length) {
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rowsForCombinedWorkbook), 'All extracted text');
+    const combinedPath = path.join(jobDir, 'combined.xlsx');
+    XLSX.writeFile(workbook, combinedPath);
+    generatedFiles.push({ outputPath: combinedPath, outputName: 'combined.xlsx' });
   }
 
-  const zipPath = path.join(outputDir, job.zipName);
-  await createZipArchive(outputFiles.map(item => path.join(outputDir, item.outputName)), zipPath);
-
-  job.status = 'completed';
-  job.progress = 100;
-  job.completedFiles = job.totalFiles;
-  job.downloadUrl = `/api/download/${jobId}`;
+  await createZip(generatedFiles, path.join(outputDir, `${job.id}.zip`));
+  job.status = job.failedFiles === job.totalFiles ? 'failed' : 'completed';
+  job.downloadUrl = job.status === 'completed' ? `/api/download/${job.id}` : null;
 }
 
-async function extractPdfData(pdfPath, useOcr) {
-  const pdfBuffer = fs.readFileSync(pdfPath);
-  const data = new Uint8Array(pdfBuffer);
-  const loadingTask = pdfjsLib.getDocument({ data });
-  const pdf = await loadingTask.promise;
-  const rows = [];
-
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
-    const textContent = await page.getTextContent();
-    const text = textContent.items
-      .map(item => item.str)
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    if (text) {
-      rows.push({
-        page: pageNumber,
-        text: text
-      });
-    }
-  }
-
-  if (useOcr && rows.length === 0) {
-    const { data: ocrData } = await Tesseract.recognize(pdfPath, 'eng');
-    const text = (ocrData?.text || '').trim();
-    if (text) {
-      rows.push({ page: 1, text });
-    }
-  }
-
-  return {
-    pageCount: pdf.numPages,
-    rows: rows.length > 0 ? rows : [{ page: 1, text: 'No extractable text found. PDF may be image-based or protected.' }]
-  };
+function safeName(value) {
+  return value.replace(/[^a-z0-9._-]+/gi, '_').replace(/^\.+/, '').slice(0, 100) || 'document';
 }
 
-function createZipArchive(filePaths, zipPath) {
+function createZip(files, zipPath) {
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(zipPath);
-    const archive = archiver('zip', { zlib: { level: 9 } });
-
-    output.on('close', () => resolve());
-    output.on('error', reject);
-    archive.on('error', reject);
-
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    output.once('close', resolve);
+    output.once('error', reject);
+    archive.once('error', reject);
     archive.pipe(output);
-    filePaths.forEach(filePath => {
-      if (fs.existsSync(filePath)) {
-        archive.file(filePath, { name: path.basename(filePath) });
-      }
-    });
-
-    archive.finalize();
+    for (const file of files) archive.file(file.outputPath, { name: file.outputName });
+    archive.finalize().catch(reject);
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`PDF Batch Agent is running on http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`PDF Batch Agent listening on port ${PORT}`));

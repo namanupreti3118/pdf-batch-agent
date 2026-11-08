@@ -1,97 +1,25 @@
-const jobsList = document.getElementById('jobsList');
-const fileInput = document.getElementById('pdfUpload');
-const submitBtn = document.getElementById('submitBtn');
-const ocrMode = document.getElementById('ocrMode');
-const combineMode = document.getElementById('combineMode');
+# PDF Batch Agent
 
-let poller = null;
+A small web app for submitting a single batch of up to 500 PDFs, extracting selectable text into Excel workbooks, and downloading the results as one ZIP.
 
-function renderJobs(jobs) {
-  if (!jobs || jobs.length === 0) {
-    jobsList.innerHTML = '<div class="job-card">No jobs yet. Upload PDFs to begin.</div>';
-    return;
-  }
+## Run locally
 
-  jobsList.innerHTML = jobs
-    .slice()
-    .reverse()
-    .map(job => {
-      const statusText = job.status || 'queued';
-      const progress = job.progress || 0;
-      const created = new Date(job.createdAt).toLocaleString();
-      const downloadLink = job.downloadUrl
-        ? `<a class="link-btn" href="${job.downloadUrl}">Download ZIP</a>`
-        : '';
+Requires Node.js 18 or newer.
 
-      return `
-        <div class="job-card">
-          <div class="job-header">
-            <strong>${job.id.slice(0, 8)}</strong>
-            <span>${statusText}</span>
-          </div>
-          <div class="job-progress">
-            <div class="job-progress-bar" style="width:${progress}%"></div>
-          </div>
-          <div class="meta">
-            <span>Created: ${created}</span>
-            <span>Files: ${job.completedFiles || 0}/${job.totalFiles || 0}</span>
-            <span>Mode: ${job.mode || 'excel'}</span>
-          </div>
-          ${downloadLink}
-        </div>
-      `;
-    })
-    .join('');
-}
+```bash
+npm install
+npm start
+```
 
-async function loadJobs() {
-  try {
-    const response = await fetch('/api/jobs');
-    const jobs = await response.json();
-    renderJobs(jobs);
-  } catch (error) {
-    console.error(error);
-  }
-}
+Open http://localhost:3000.
 
-submitBtn.addEventListener('click', async () => {
-  const files = Array.from(fileInput.files || []);
-  if (files.length === 0) {
-    alert('Please select at least one PDF file.');
-    return;
-  }
+## Batch behavior
 
-  const formData = new FormData();
-  files.forEach(file => formData.append('pdfs', file));
-  formData.append('mode', 'excel');
-  formData.append('ocr', String(ocrMode.checked));
-  formData.append('combine', String(combineMode.checked));
+- Select and upload up to 500 PDFs in one batch.
+- Files are processed sequentially in the background so the server does not try to parse all PDFs at once.
+- Each PDF gets its own workbook; `combined.xlsx` contains extracted text from the batch.
+- Failed files are reported in job status; successful results are still available in the ZIP.
+- The backend currently limits each individual PDF to 100 MB. Actual throughput depends on file size, PDF complexity, server resources, and whether PDFs contain selectable text.
+- Scanned/image-only PDFs need OCR; OCR and structured table recognition are not implemented yet. This initial version extracts PDF text lines and is not guaranteed to preserve table layout.
 
-  submitBtn.disabled = true;
-  submitBtn.textContent = 'Uploading...';
-
-  try {
-    const response = await fetch('/api/upload', {
-      method: 'POST',
-      body: formData
-    });
-
-    const result = await response.json();
-    if (!response.ok) {
-      throw new Error(result.error || 'Upload failed.');
-    }
-
-    loadJobs();
-    if (poller) clearInterval(poller);
-    poller = setInterval(loadJobs, 2500);
-    alert('Batch submitted successfully.');
-  } catch (error) {
-    alert(error.message);
-  } finally {
-    submitBtn.disabled = false;
-    submitBtn.textContent = 'Start batch';
-  }
-});
-
-loadJobs();
-setInterval(loadJobs, 2500);
+Jobs are held in memory and uploaded files are stored locally, so this starter is intended for a single server instance rather than production multi-user deployment.
