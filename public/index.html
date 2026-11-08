@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF Batch Agent</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">AI PDF Workflow</p>
+          <h1>PDF Batch Agent</h1>
+        </div>
+        <span class="badge">Bulk conversion</span>
+      </header>
+
+      <main class="container">
+        <section class="hero card">
+          <div class="hero-copy">
+            <h2>Convert hundreds of PDFs into Excel and text output.</h2>
+            <p>
+              Built for large document batches, job queueing, extraction, and easy downloads.
+            </p>
+          </div>
+
+          <div class="controls">
+            <label class="upload-box" for="pdfUpload">
+              <input id="pdfUpload" type="file" accept=".pdf" multiple />
+              <span>Choose PDFs</span>
+            </label>
+
+            <div class="options">
+              <label>
+                <input type="checkbox" id="ocrMode" />
+                OCR scanned PDFs
+              </label>
+              <label>
+                <input type="checkbox" id="combineMode" checked />
+                Create summary workbook
+              </label>
+            </div>
+
+            <button id="submitBtn" class="primary-btn">Start batch</button>
+          </div>
+        </section>
+
+        <section class="jobs card">
+          <div class="section-header">
+            <h3>Processing jobs</h3>
+          </div>
+          <div id="jobsList" class="jobs-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

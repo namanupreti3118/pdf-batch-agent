@@ -1,0 +1,23 @@
+{
+  "name": "pdf-batch-agent",
+  "version": "1.0.0",
+  "description": "Bulk PDF to Excel agent and website for processing hundreds of PDF files.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "pdfjs-dist": "^4.7.76",
+    "tesseract.js": "^5.1.1",
+    "uuid": "^11.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  }
+}
